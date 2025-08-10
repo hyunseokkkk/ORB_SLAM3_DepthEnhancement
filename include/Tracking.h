@@ -36,11 +36,16 @@
 #include "System.h"
 #include "ImuTypes.h"
 #include "Settings.h"
-
+#include "DepthEnhancer.h"
 #include "GeometricCamera.h"
 
 #include <mutex>
 #include <unordered_set>
+#include <fstream>
+#include <iomanip>
+#include <ctime>
+#include <cerrno>
+#include <cstring>
 
 namespace ORB_SLAM3
 {
@@ -356,7 +361,10 @@ protected:
     Sophus::SE3f mTlr;
 
     void newParameterLoader(Settings* settings);
-
+    
+    ORB_SLAM3::DepthEnhancer* mpDepthEnhancer;
+    std::ofstream mDepthMetricsFile;
+    bool mbDepthMetricsFileOpen;
 #ifdef REGISTER_LOOP
     bool Stop();
 

@@ -29,6 +29,7 @@
 #include "MLPnPsolver.h"
 #include "GeometricTools.h"
 
+
 #include <iostream>
 
 #include <mutex>
@@ -46,7 +47,10 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
     mbOnlyTracking(false), mbMapUpdated(false), mbVO(false), mpORBVocabulary(pVoc), mpKeyFrameDB(pKFDB),
     mbReadyToInitializate(false), mpSystem(pSys), mpViewer(NULL), bStepByStep(false),
     mpFrameDrawer(pFrameDrawer), mpMapDrawer(pMapDrawer), mpAtlas(pAtlas), mnLastRelocFrameId(0), time_recently_lost(5.0),
-    mnInitialFrameId(0), mbCreatedMap(false), mnFirstFrameId(0), mpCamera2(nullptr), mpLastKeyFrame(static_cast<KeyFrame*>(NULL))
+    mnInitialFrameId(0), mbCreatedMap(false), mnFirstFrameId(0), mpCamera2(nullptr), 
+    mpLastKeyFrame(static_cast<KeyFrame*>(NULL)),
+    mpDepthEnhancer(nullptr),
+    mbDepthMetricsFileOpen(false) 
 {
     // Load camera parameters from settings file
     if(settings){
@@ -128,6 +132,51 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
     vdNewKF_ms.clear();
     vdTrackTotal_ms.clear();
 #endif
+
+    mpDepthEnhancer = nullptr; 
+    if(mSensor==System::RGBD || mSensor==System::IMU_RGBD) { 
+    ORB_SLAM3::DepthEnhancer::Config config; 
+    config.fx = mK.at<float>(0,0); 
+    config.fy = mK.at<float>(1,1); 
+    config.cx = mK.at<float>(0,2); 
+    config.cy = mK.at<float>(1,2); 
+    //Parameter  
+    config.maxHistorySize = 5;
+    config.maxKeyFrames = 3;
+    config.patchSize = 3;
+    config.processingStep = 2; // Process every 2nd pixel
+    mpDepthEnhancer = new ORB_SLAM3::DepthEnhancer(config);
+    cout << "[DepthEnhancer] Initialized for RGB-D (Jetson optimized)" << endl; 
+    
+            // ========== CSV 파일 생성 코드 추가 ==========
+        // 평가 결과 파일 생성
+        string metricsFilename = "depth_enhancement_metrics_" + 
+                                to_string(std::time(nullptr)) + ".csv";
+        
+        // 파일 열기
+        mDepthMetricsFile.open(metricsFilename);
+        if(mDepthMetricsFile.is_open()) {
+            mbDepthMetricsFileOpen = true;
+            
+            // CSV 헤더 작성
+            mDepthMetricsFile << "Frame,Timestamp,ValidPixelsOrig(%),ValidPixelsEnh(%),"
+                             << "ValidIncrease(%),HolesOrig,HolesEnh,HolesFilled,"
+                             << "MeanDepthOrig,MeanDepthEnh,StdOrig,StdEnh,"
+                             << "NoiseReduction(%),EdgeStdOrig,EdgeStdEnh,"
+                             << "ProcessingTime(ms),TrackedFeatures,TrackingState\n";
+            
+            // 소수점 자리수 설정
+            mDepthMetricsFile << std::fixed << std::setprecision(4);
+            
+            cout << "[DepthEnhancer] Metrics file created: " << metricsFilename << endl;
+        } else {
+            cerr << "[DepthEnhancer] Failed to create metrics file: " << metricsFilename << endl;
+            mbDepthMetricsFileOpen = false;
+        }
+        // ========== CSV 파일 생성 코드 끝 ==========
+    }
+    
+
 }
 
 #ifdef REGISTER_TIMES
@@ -529,6 +578,18 @@ void Tracking::PrintTimeStats()
 Tracking::~Tracking()
 {
     //f_track_stats.close();
+    if(mpDepthEnhancer){
+    	delete mpDepthEnhancer;
+    	mpDepthEnhancer = nullptr;
+    	
+    }
+    
+    if(mbDepthMetricsFileOpen && mDepthMetricsFile.is_open())
+    {
+        mDepthMetricsFile << "\n# Final Statistics\n";
+        mDepthMetricsFile.close();
+        cout << "[DepthEnhancer] Metrics file saved and closed." << endl;
+    }
 
 }
 
@@ -1521,7 +1582,7 @@ Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, co
 {
     mImGray = imRGB;
     cv::Mat imDepth = imD;
-
+    
     if(mImGray.channels()==3)
     {
         if(mbRGB)
@@ -1536,29 +1597,179 @@ Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, co
         else
             cvtColor(mImGray,mImGray,cv::COLOR_BGRA2GRAY);
     }
-
+    
+    // DepthMapFactor 적용을 먼저 수행
     if((fabs(mDepthMapFactor-1.0f)>1e-5) || imDepth.type()!=CV_32F)
         imDepth.convertTo(imDepth,CV_32F,mDepthMapFactor);
-
+    
+    // Frame 생성 (ID를 얻기 위해)
     if (mSensor == System::RGBD)
         mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera);
     else if(mSensor == System::IMU_RGBD)
         mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,&mLastFrame,*mpImuCalib);
-
-
-
-
-
-
+    
     mCurrentFrame.mNameFile = filename;
     mCurrentFrame.mnDataset = mnNumDataset;
-
-#ifdef REGISTER_TIMES
+    
+    // ========== Depth Enhancement 추가 ==========
+    cv::Mat enhancedDepth = imDepth.clone(); // 기본값은 원본
+    
+    if(mpDepthEnhancer && mState == OK && mpLastKeyFrame)
+    {
+        try {
+            // 마지막 키프레임의 포즈 가져오기
+            Sophus::SE3f lastPoseSE3 = mpLastKeyFrame->GetPose();
+            Eigen::Matrix4f lastPose = lastPoseSE3.matrix();
+            
+            // 마지막 키프레임의 특징점들
+            vector<cv::KeyPoint> lastKeypoints = mpLastKeyFrame->mvKeys;
+            cv::Mat lastDescriptors = mpLastKeyFrame->mDescriptors;
+            
+            // 키프레임 여부 확인
+            bool isKeyFrame = false;
+            if(mpLocalMapper && mpLocalMapper->AcceptKeyFrames())
+            {
+                if(mCurrentFrame.mnId > mnLastKeyFrameId + 5)
+                {
+                    isKeyFrame = true;
+                }
+            }
+            
+            // Enhancement 수행
+            auto enhanceStart = chrono::steady_clock::now();
+            
+            enhancedDepth = mpDepthEnhancer->enhanceDepth(
+                imDepth,  // 이미 factor가 적용된 depth
+                imRGB,
+                lastPose,
+                lastKeypoints,
+                lastDescriptors,
+                timestamp,
+                isKeyFrame
+            );
+            
+            auto enhanceEnd = chrono::steady_clock::now();
+            
+            // ========== 수치 평가 코드 ==========
+            static int evaluationFrameCount = 0;
+            static double totalNoiseReduction = 0.0;
+            static double totalHolesFilled = 0.0;
+            static double totalValidPixelIncrease = 0.0;
+            
+            evaluationFrameCount++;
+            
+            // 1. 유효 픽셀 비율
+            cv::Mat validMaskOrig = (imDepth > 0.1f) & (imDepth < 10.0f);
+            cv::Mat validMaskEnh = (enhancedDepth > 0.1f) & (enhancedDepth < 10.0f);
+            
+            int validOriginal = cv::countNonZero(validMaskOrig);
+            int validEnhanced = cv::countNonZero(validMaskEnh);
+            int totalPixels = imDepth.rows * imDepth.cols;
+            
+            float validRatioOrig = (float)validOriginal / totalPixels * 100;
+            float validRatioEnh = (float)validEnhanced / totalPixels * 100;
+            float validIncrease = validRatioEnh - validRatioOrig;
+            totalValidPixelIncrease += validIncrease;
+            
+            // 2. 홀(구멍) 개수
+            int holesOriginal = cv::countNonZero(imDepth == 0);
+            int holesEnhanced = cv::countNonZero(enhancedDepth == 0);
+            int holesFilled = holesOriginal - holesEnhanced;
+            totalHolesFilled += holesFilled;
+            
+            // 3. 노이즈 레벨 (표준편차)
+            cv::Scalar meanOrig, stdOrig, meanEnh, stdEnh;
+            cv::meanStdDev(imDepth, meanOrig, stdOrig, validMaskOrig);
+            cv::meanStdDev(enhancedDepth, meanEnh, stdEnh, validMaskEnh);
+            
+            float noiseReduction = 0;
+            if(stdOrig[0] > 0) {
+                noiseReduction = (1.0 - stdEnh[0]/stdOrig[0]) * 100;
+            }
+            totalNoiseReduction += noiseReduction;
+            
+            // 4. Edge 영역의 depth 일관성
+            cv::Mat edges;
+            cv::Canny(mImGray, edges, 50, 150);
+            cv::dilate(edges, edges, cv::Mat(), cv::Point(-1,-1), 2);
+            
+            cv::Scalar edgeStdOrig, edgeStdEnh;
+            cv::Mat edgeMaskOrig = edges & validMaskOrig;
+            cv::Mat edgeMaskEnh = edges & validMaskEnh;
+            cv::meanStdDev(imDepth, cv::noArray(), edgeStdOrig, edgeMaskOrig);
+            cv::meanStdDev(enhancedDepth, cv::noArray(), edgeStdEnh, edgeMaskEnh);
+            
+            // 처리 시간
+            double processingTime = chrono::duration<double, milli>(enhanceEnd - enhanceStart).count();
+            
+            // Tracking 상태
+            string trackingState = "UNKNOWN";
+            if(mState == OK) trackingState = "OK";
+            else if(mState == LOST) trackingState = "LOST";
+            else if(mState == RECENTLY_LOST) trackingState = "RECENTLY_LOST";
+            else if(mState == NOT_INITIALIZED) trackingState = "NOT_INITIALIZED";
+            
+            // CSV 파일에 기록
+            if(mbDepthMetricsFileOpen && mDepthMetricsFile.is_open()) {
+                mDepthMetricsFile << mCurrentFrame.mnId << ","
+                                 << timestamp << ","
+                                 << validRatioOrig << ","
+                                 << validRatioEnh << ","
+                                 << validIncrease << ","
+                                 << holesOriginal << ","
+                                 << holesEnhanced << ","
+                                 << holesFilled << ","
+                                 << meanOrig[0] << ","
+                                 << meanEnh[0] << ","
+                                 << stdOrig[0] << ","
+                                 << stdEnh[0] << ","
+                                 << noiseReduction << ","
+                                 << edgeStdOrig[0] << ","
+                                 << edgeStdEnh[0] << ","
+                                 << processingTime << ","
+                                 << mCurrentFrame.mvKeys.size() << ","
+                                 << trackingState << "\n";
+                mDepthMetricsFile.flush(); // 즉시 파일에 쓰기
+            }
+            
+            // 30프레임마다 콘솔 출력
+            if(evaluationFrameCount % 30 == 0)
+            {
+                cout << "\n======== Depth Enhancement Metrics (30 frame avg) ========" << endl;
+                cout << "Frame ID: " << mCurrentFrame.mnId << endl;
+                cout << "Valid pixels - Orig: " << validRatioOrig << "%, Enh: " << validRatioEnh << "%" << endl;
+                cout << "Valid pixels increase: " << totalValidPixelIncrease/30 << "%" << endl;
+                cout << "Holes filled per frame: " << totalHolesFilled/30 << " pixels" << endl;
+                cout << "Noise reduction: " << totalNoiseReduction/30 << "%" << endl;
+                cout << "Current frame - Orig std: " << stdOrig[0] << ", Enh std: " << stdEnh[0] << endl;
+                cout << "Edge consistency - Orig: " << edgeStdOrig[0] << ", Enh: " << edgeStdEnh[0] << endl;
+                cout << "Processing time: " << processingTime << "ms" << endl;
+                cout << "========================================================\n" << endl;
+                
+                totalNoiseReduction = 0;
+                totalHolesFilled = 0;
+                totalValidPixelIncrease = 0;
+            }
+            // ========== 수치 평가 코드 끝 ==========
+        }
+        catch(exception& e) {
+            cerr << "[DepthEnhancer] Error: " << e.what() << endl;
+        }
+    }
+    // ========== Depth Enhancement 끝 ==========
+    
+    // Enhanced depth를 Frame에 업데이트
+    if (mSensor == System::RGBD)
+        mCurrentFrame = Frame(mImGray,enhancedDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera);
+    else if(mSensor == System::IMU_RGBD)
+        mCurrentFrame = Frame(mImGray,enhancedDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,&mLastFrame,*mpImuCalib);
+    
+    #ifdef REGISTER_TIMES
     vdORBExtract_ms.push_back(mCurrentFrame.mTimeORB_Ext);
-#endif
-
+    #endif
+    
     Track();
-
+    
     return mCurrentFrame.GetPose();
 }
 
@@ -1787,7 +1998,12 @@ bool Tracking::PredictStateIMU()
 
 void Tracking::ResetFrameIMU()
 {
+    Verbose::PrintMess("   System Reseting ", Verbose::VERBOSITY_NORMAL);
     // TODO To implement...
+    if(mpDepthEnhancer)
+    {
+    	mpDepthEnhancer->reset();
+    }
 }
 
 
@@ -3868,8 +4084,11 @@ void Tracking::ResetActiveMap(bool bLocMap)
 
     // Clear Map (this erase MapPoints and KeyFrames)
     mpAtlas->clearMap();
-
-
+    
+    if(mpDepthEnhancer){
+    	mpDepthEnhancer->reset();
+    	}
+    
     //KeyFrame::nNextId = mpAtlas->GetLastInitKFid();
     //Frame::nNextId = mnLastInitFrameId;
     mnLastInitFrameId = Frame::nNextId;
