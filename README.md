@@ -134,7 +134,20 @@ sudo apt-get install -y \
     libopencv-dev \
     libgl1-mesa-dev \
     libglew-dev
-
+```
+```
+# RealSense SDK 
+sudo apt-get install -y libssl-dev libusb-1.0-0-dev libx11-dev
+git clone https://github.com/IntelRealSense/librealsense.git
+cd librealsense
+mkdir build && cd build
+cmake .. -DBUILD_EXAMPLES=true
+make -j
+sudo make install
+sudo ldconfig
+cd ../..
+```
+```
 # Build Pangolin
 git clone --recursive https://github.com/stevenlovegrove/Pangolin.git
 cd Pangolin
@@ -153,14 +166,14 @@ chmod +x build.sh
 
 ## Usage
 
-### Running with Intel RealSense
+## Running with Intel RealSense
 ```bash
 ./Examples/RGB-D/rgbd_realsense_D435i \
     Vocabulary/ORBvoc.txt \
     Examples/RGB-D/RealSense_D435i.yaml
 ```
 
-### Configuration Parameters
+## Configuration Parameters
 
 Edit the configuration in `src/Tracking.cc`:
 ```cpp
@@ -206,7 +219,8 @@ Average processing time breakdown (Jetson Nano):
 ### Visual Comparison
 
 <img width="173" height="144" alt="image" src="https://github.com/user-attachments/assets/854cb496-8c6e-49b0-bd12-643c1ce3a5ac" />
-<img width="173" height="144" alt="image" src="https://github.com/user-attachments/assets/d6b566b4-437b-4ba8-8527-4c2958fce8b4" />
+<img width="172" height="144" alt="image" src="https://github.com/user-attachments/assets/78c0aff5-a0a9-4fa0-9c48-65f3a5622cef" />
+
 
 *Top: Original noisy depth map with holes. bottom: Enhanced depth map with filled holes and reduced noise.*
 
