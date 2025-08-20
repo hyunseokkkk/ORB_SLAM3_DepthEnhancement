@@ -1,5 +1,11 @@
 # ORB_SLAM3_DepthEnhancement
 
+[한국어 버전](./README_ko.md)
+
+---
+
+# English Version
+
 ## Overview
 
 This project presents an enhanced version of ORB-SLAM3 that incorporates real-time depth map refinement for RGB-D cameras. By implementing temporal fusion and spatial refinement techniques, we significantly improve the quality of depth measurements, leading to more robust tracking and mapping performance. The system is optimized for edge devices like Jetson Nano while maintaining real-time performance.
@@ -280,3 +286,5 @@ Viewer.ViewpointF: 2000
 ## Acknowledgments
 
 - Original ORB-SLAM3 by Carlos Campos, Richard Elvira, et al.
+
+
