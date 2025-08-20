@@ -4,8 +4,6 @@
 
 ---
 
-# English Version
-
 ## Overview
 
 This project presents an enhanced version of ORB-SLAM3 that incorporates real-time depth map refinement for RGB-D cameras. By implementing temporal fusion and spatial refinement techniques, we significantly improve the quality of depth measurements, leading to more robust tracking and mapping performance. The system is optimized for edge devices like Jetson Nano while maintaining real-time performance.
@@ -228,7 +226,7 @@ Average processing time breakdown (Jetson Nano):
 <img width="172" height="144" alt="image" src="https://github.com/user-attachments/assets/78c0aff5-a0a9-4fa0-9c48-65f3a5622cef" />
 
 
-*Top: Original noisy depth map with holes. bottom: Enhanced depth map with filled holes and reduced noise.*
+*Left: Original noisy depth map with holes. right: Enhanced depth map with filled holes and reduced noise.*
 
 ## Comparison with Original ORB-SLAM3
 
